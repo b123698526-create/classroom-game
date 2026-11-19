@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>夢境碎片：未寫完的預言</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101322;color:#eee9ff;font-family:system-ui,sans-serif}
+main{max-width:1100px;margin:auto;padding:16px}
+h1{font-size:23px;margin:4px 0 8px}
+p{color:#c1bdd8;line-height:1.6}
+canvas{width:100%;display:block;border:1px solid #676587;border-radius:16px;background:#171c32}
+.panel{padding:16px;background:#22263d;border-radius:14px;margin-top:12px}
+#sentence{line-height:1.9;min-height:50px}
+button{background:#3a365d;color:white;border:1px solid #8275aa;border-radius:12px;padding:13px 18px;font:inherit;cursor:pointer;touch-action:none}
+button:focus-visible{outline:3px solid #d3b4ff}
+button:disabled{opacity:.45;cursor:default}
+.controls{display:flex;gap:8px;justify-content:center;margin:12px 0;flex-wrap:wrap;user-select:none}
+.controls button{min-width:65px;min-height:54px}
+small{color:#b6afcf}
+dialog{color:#eee9ff;background:#22263d;border:1px solid #8275aa;border-radius:20px;max-width:520px;width:90%;padding:25px}
+dialog::backdrop{background:#080b18cc}
+#result{white-space:pre-line;line-height:1.8}
+</style>
+</head>
+<body>
+<main>
+<h1>夢境碎片 · 未寫完的預言</h1>
+<p id="hint">在月光裡找回六個句子，搬到最右方祭壇，排列你的預言。</p>
+<canvas id="game" width="960" height="540" aria-label="夢境橫向探索遊戲"></canvas>
+<div class="controls" aria-label="觸控操作">
+<button data-key="left" aria-label="向左">◀</button>
+<button data-key="right" aria-label="向右">▶</button>
+<button data-key="jump">跳躍</button>
+<button data-key="grab">按住抓取</button>
+</div>
+<small>鍵盤：A／D 或 ←／→ 移動 · 空白鍵跳躍 · 按住 1 抓取，放開放下。
+靠近箱子可推動；站上箱子再跳，能登上高台。</small>
+<div class="panel">
+<div id="sentence"></div>
+<button id="resolve" disabled>讓預言成真</button>
+<button id="reset">重新開始</button>
+</div>
+</main>
+<dialog id="intro">
+<h2>夢還沒有寫完</h2>
+<p>探索這段夢境，找到六塊發光的記憶。按住抓取鍵帶著它移動，鬆開就放下。</p>
+<p>高台上的碎片，需要把木箱推到高台旁，踩上箱子再跳。
+將碎片帶到最右方六個光圈上方，放手就會嵌入。</p>
+<p>排列沒有標準答案。六個句子的前後順序，會改變故事與夢境的結局。</p>
+<button id="start">走進夢裡</button>
+</dialog>
+<dialog id="ending">
+<h2 id="endingTitle"></h2>
+<p id="result"></p>
+<button id="reorder">回到夢裡重新排列</button>
+<button id="again">重新探索</button>
+</dialog>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const canvas=$("game"), ctx=canvas.getContext("2d");
+const W=2200, ground=450;
+const phrases=[
+ "月亮墜入海中",
+ "沉睡的人醒來",
+ "失去的名字被想起",
+ "緊閉的大門開啟",
+ "影子學會說話",
+ "我選擇留下"
+];
+const colors=["#b9b5ff","#ffd79b","#94ddd9","#e6b0e4","#a7c3ff","#c5e5ab"];
+const platforms=[
+ {x:300,y:350,w:150,h:18},
+ {x:660,y:260,w:180,h:20},
+ {x:1010,y:345,w:150,h:18}
+];
+let player,box,fragments,slots,held=null,camera=0,active=false;
+let previousGrab=false,previousJump=false,worldTint="#171c32";
+const keys=new Set(),touch=new Map();
+const down=k=>keys.has(k)||[...touch.values()].includes(k);
+const near=(a,b)=>Math.hypot(a.x+a.w/2-b.x-b.w/2,a.y+a.h/2-b.y-b.h/2);
+const overlap=(a,b)=>a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;
+function releaseInputs(){keys.clear();touch.clear()}
+function reset(){
+ releaseInputs();
+ player={x:65,y:ground-50,w:28,h:50,vy:0,on:false,face:1};
+ box={x:570,y:ground-65,w:65,h:65,vy:0,type:"box"};
+ fragments=[
+  {x:190,y:ground-34},{x:355,y:316},{x:725,y:226},
+  {x:1070,y:311},{x:1300,y:ground-34},{x:1450,y:ground-34}
+ ].map((p,i)=>({...p,w:34,h:34,vy:0,id:i,type:"fragment",slot:null}));
+ slots=Array(6).fill(null);held=null;camera=0;
+ previousGrab=false;previousJump=false;worldTint="#171c32";
+ updateSentence();
+}
+function updateSentence(){
+ $("sentence").textContent=slots.map((id,i)=>id===null?`【${i+1}：空缺】`:phrases[id]).join(" → ");
+ $("resolve").disabled=slots.some(id=>id===null);
+}
+function grab(){
+ const candidates=[box,...fragments].filter(o=>near(player,o)<88);
+ candidates.sort((a,b)=>near(player,a)-near(player,b));
+ held=candidates[0]||null;
+ if(held&&held.type==="fragment"&&held.slot!==null){
+  slots[held.slot]=null;held.slot=null;updateSentence();
+ }
+}
+function drop(){
+ if(!held)return;
+ if(held.type==="fragment"){
+  const center=held.x+held.w/2;
+  let best=-1,dist=Infinity;
+  slots.forEach((id,i)=>{
+   const d=Math.abs(center-(1660+i*78));
+   if(id===null&&d<38&&d<dist){dist=d;best=i}
+  });
+  if(best>=0&&held.y>ground-140){
+   held.slot=best;held.x=1660+best*78-held.w/2;
+   held.y=ground-held.h;held.vy=0;slots[best]=held.id;
+   updateSentence();
+  }
+ }
+ held.vy=0;held=null;
+}
+function fall(o,dt,solids){
+ const oldBottom=o.y+o.h;
+ o.vy+=1100*dt;o.y+=o.vy*dt;
+ let landing=ground;
+ for(const s of solids){
+  if(o.x+o.w>s.x&&o.x<s.x+s.w&&oldBottom<=s.y+2&&o.y+o.h>=s.y)
+   landing=Math.min(landing,s.y);
+ }
+ o.on=false;
+ if(o.y+o.h>=landing&&o.vy>=0){
+  o.y=landing-o.h;o.vy=0;o.on=true;
+ }
+}
+function update(dt){
+ const grabbing=down("grab"),jumping=down("jump");
+ if(grabbing&&!previousGrab)grab();
+ if(!grabbing&&previousGrab)drop();
+ previousGrab=grabbing;
+ if(jumping&&!previousJump&&player.on){player.vy=-470;player.on=false}
+ previousJump=jumping;
+ const dir=Number(down("right"))-Number(down("left"));
+ if(dir)player.face=dir;
+ const oldX=player.x;
+ player.x=Math.max(0,Math.min(W-player.w,player.x+dir*220*dt));
+ if(held!==box){
+  fall(box,dt,platforms);
+  if(overlap(player,box)){
+   const moved=player.x-oldX;
+   box.x=Math.max(0,Math.min(W-box.w,box.x+moved));
+   player.x=dir>0?box.x-player.w:dir<0?box.x+box.w:oldX;
+  }
+ }
+ fall(player,dt,held===box?platforms:[...platforms,box]);
+ for(const f of fragments){
+  if(f!==held&&f.slot===null)fall(f,dt,[...platforms,...(held===box?[]:[box])]);
+ }
+ if(held){
+  held.x=Math.max(0,Math.min(W-held.w,
+   player.x+player.w/2+player.face*38-held.w/2));
+  held.y=player.y+12;held.vy=0;
+ }
+ camera=Math.max(0,Math.min(W-canvas.width,player.x-350));
+ $("hint").textContent=held
+ ? `正拿著${held.type==="box"?"木箱":"「"+phrases[held.id]+"」"}：放開抓取鍵即可放下。`
+ : player.x>1540
+ ? "將碎片搬到空光圈上方再放手。已放入的碎片也能重新拿起排序。"
+ : "探索夢境：靠近發光碎片，按住 1 搬走；高台旁的箱子可以推動或搬動。";
+}
+function rect(x,y,w,h,color){
+ ctx.fillStyle=color;ctx.fillRect(x,y,w,h);
+}
+function draw(){
+ rect(0,0,960,540,worldTint);
+ ctx.fillStyle="#e5ddff";ctx.beginPath();ctx.arc(780-camera*.08,90,36,0,Math.PI*2);ctx.fill();
+ for(let i=0;i<55;i++){
+  const x=((i*173-camera*.18)%1000+1000)%1000;
+  rect(x,25+(i*47)%260,2,2,"#bbb9d3");
+ }
+ ctx.save();ctx.translate(-camera,0);
+ for(let i=0;i<11;i++){
+  rect(i*235,210+(i%3)*25,110,240,"#232940");
+  rect(i*235+25,240+(i%3)*25,20,35,"#464364");
+ }
+ rect(0,ground,W,90,"#30334b");
+ rect(0,ground,W,3,"#8f83b1");
+ platforms.forEach(p=>{
+  rect(p.x,p.y,p.w,p.h,"#655c80");
+  rect(p.x,p.y,p.w,3,"#b2a2c9");
+ });
+ ctx.textAlign="center";ctx.font="16px system-ui";
+ ctx.fillStyle="#e0d2ff";ctx.fillText("預言祭壇 · 從左至右閱讀",1855,330);
+ slots.forEach((id,i)=>{
+  const x=1660+i*78;
+  ctx.strokeStyle=id===null?"#8f83b1":colors[id];ctx.lineWidth=2;
+  ctx.strokeRect(x-24,ground-43,48,48);
+  ctx.fillStyle="#c9b9e0";ctx.fillText(String(i+1),x,ground+28);
+ });
+ rect(box.x,box.y,box.w,box.h,"#9b7c68");
+ ctx.strokeStyle="#dec19c";ctx.lineWidth=3;
+ ctx.strokeRect(box.x+5,box.y+5,box.w-10,box.h-10);
+ ctx.beginPath();ctx.moveTo(box.x+5,box.y+5);
+ ctx.lineTo(box.x+box.w-5,box.y+box.h-5);ctx.stroke();
+ fragments.forEach(f=>{
+  ctx.shadowColor=colors[f.id];ctx.shadowBlur=15;
+  rect(f.x,f.y,f.w,f.h,colors[f.id]);ctx.shadowBlur=0;
+  ctx.fillStyle="#242238";ctx.font="bold 18px system-ui";
+  ctx.fillText(String(f.id+1),f.x+17,f.y+24);
+  if(near(player,f)<140||held===f){
+   ctx.font="14px system-ui";
+   const width=ctx.measureText(phrases[f.id]).width+16;
+   rect(f.x+17-width/2,f.y-28,width,23,"#171c32");
+   ctx.fillStyle="#fff";ctx.fillText(phrases[f.id],f.x+17,f.y-11);
+  }
+ });
+ rect(player.x,player.y+17,player.w,33,"#a59bd4");
+ ctx.fillStyle="#eee1d8";ctx.beginPath();
+ ctx.arc(player.x+14,player.y+10,12,0,Math.PI*2);ctx.fill();
+ rect(player.x+(player.face>0?18:6),player.y+7,3,3,"#30304b");
+ if(held){
+  ctx.strokeStyle="#eee1d8";ctx.lineWidth=5;
+  ctx.beginPath();ctx.moveTo(player.x+14,player.y+24);
+  ctx.lineTo(held.x+held.w/2,held.y+held.h/2);ctx.stroke();
+ }
+ ctx.restore();
+ ctx.textAlign="left";ctx.font="15px system-ui";ctx.fillStyle="#eee9ff";
+ ctx.fillText(`祭壇碎片 ${slots.filter(x=>x!==null).length} / 6`,18,28);
+ ctx.fillText(player.x<1500?"往右探索 →":"自由排列你的預言",18,51);
+}
+const keyMap={ArrowLeft:"left",KeyA:"left",ArrowRight:"right",KeyD:"right",
+ Space:"jump",ArrowUp:"jump",KeyW:"jump",Digit1:"grab",Numpad1:"grab"};
+window.addEventListener("keydown",e=>{
+ const k=keyMap[e.code];
+ if(!k||!active)return;
+ if(e.target instanceof HTMLButtonElement && e.code==="Space")return;
+ e.preventDefault();keys.add(k);
+});
+window.addEventListener("keyup",e=>{
+ const k=keyMap[e.code];if(k)keys.delete(k);
+});
+document.querySelectorAll("[data-key]").forEach(b=>{
+ b.addEventListener("pointerdown",e=>{
+  if(!active)return;
+  e.preventDefault();b.setPointerCapture(e.pointerId);
+  touch.set(e.pointerId,b.dataset.key);
+ });
+ ["pointerup","pointercancel","lostpointercapture"].forEach(name=>
+  b.addEventListener(name,e=>touch.delete(e.pointerId)));
+ b.addEventListener("contextmenu",e=>e.preventDefault());
+});
+window.addEventListener("blur",()=>{releaseInputs();drop();previousGrab=false});
+document.addEventListener("visibilitychange",()=>{
+ if(document.hidden){releaseInputs();drop();previousGrab=false}
+});
+$("resolve").onclick=()=>{
+ if(slots.some(x=>x===null))return;
+ active=false;releaseInputs();drop();
+ const pos=id=>slots.indexOf(id);
+ let title,text;
+ if(pos(3)<pos(4)){
+  title="結局 · 門外的黎明";
+  text="大門在影子開口前開啟。第一道晨光穿過夢境，你帶著尚未說完的故事走向遠方。";
+  worldTint="#34485d";
+ }else if(pos(2)<pos(1)){
+  title="結局 · 被記住的人";
+  text="名字先於甦醒被找回。沉睡的人認出了你，破碎的夢慢慢長成一個可以回去的地方。";
+  worldTint="#3c3457";
+ }else{
+  title="結局 · 會說話的夜";
+  text="影子先說出了預言，醒來的人卻還沒有名字。夢境沒有散去，而是向你展開另一條路。";
+  worldTint="#1b3c43";
+ }
+ text+="\n\n"+(pos(0)<pos(5)
+  ?"月亮落下後，你選擇留下，成為這段夢的守望者。"
+  :"你先決定留下，才目睹月亮落海；這一次，你記得整個過程。");
+ $("endingTitle").textContent=title;
+ $("result").textContent=slots.map(id=>phrases[id]).join("，")+"。\n\n"+text;
+ $("ending").showModal();
+};
+$("start").onclick=()=>{$("intro").close();active=true;releaseInputs()};
+$("reset").onclick=()=>{reset();active=true};
+$("reorder").onclick=()=>{$("ending").close();active=true;releaseInputs()};
+$("again").onclick=()=>{$("ending").close();reset();active=true};
+$("intro").addEventListener("cancel",e=>e.preventDefault());
+$("ending").addEventListener("cancel",e=>e.preventDefault());
+reset();$("intro").showModal();
+let last=performance.now();
+function frame(now){
+ const dt=Math.min((now-last)/1000,.035);last=now;
+ if(active&&!document.hidden)update(dt);
+ draw();requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
